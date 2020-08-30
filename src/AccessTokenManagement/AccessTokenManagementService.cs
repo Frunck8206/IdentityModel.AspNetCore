@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System;
 using System.Collections.Concurrent;
+using System.Security.Claims;
 using System.Threading.Tasks;
 
 namespace IdentityModel.AspNetCore.AccessTokenManagement
@@ -28,7 +29,6 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
         private readonly AccessTokenManagementOptions _options;
         private readonly ITokenEndpointService _tokenEndpointService;
         private readonly IClientAccessTokenCache _clientAccessTokenCache;
-        private readonly IHttpContextAccessor _httpContextAccessor;
         private readonly ILogger<AccessTokenManagementService> _logger;
 
         /// <summary>
@@ -39,7 +39,6 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
         /// <param name="options"></param>
         /// <param name="tokenEndpointService"></param>
         /// <param name="clientAccessTokenCache"></param>
-        /// <param name="httpContextAccessor"></param>
         /// <param name="logger"></param>
         public AccessTokenManagementService(
             IUserTokenStore userTokenStore,
@@ -47,7 +46,6 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
             IOptions<AccessTokenManagementOptions> options,
             ITokenEndpointService tokenEndpointService,
             IClientAccessTokenCache clientAccessTokenCache,
-            IHttpContextAccessor httpContextAccessor,
             ILogger<AccessTokenManagementService> logger)
         {
             _userTokenStore = userTokenStore;
@@ -55,7 +53,6 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
             _options = options.Value;
             _tokenEndpointService = tokenEndpointService;
             _clientAccessTokenCache = clientAccessTokenCache;
-            _httpContextAccessor = httpContextAccessor;
             _logger = logger;
         }
 
@@ -103,22 +100,26 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
         }
 
         /// <inheritdoc/>
-        public async Task<string> GetUserAccessTokenAsync(bool forceRenewal = false)
+        public async Task<string> GetUserAccessTokenAsync(ClaimsPrincipal user, bool forceRenewal = false)
         {
-            var user = _httpContextAccessor.HttpContext.User;
-
-            if (!user.Identity.IsAuthenticated)
+            if (user == null || !user.Identity.IsAuthenticated)
             {
                 return null;
             }
 
             var userName = user.FindFirst(JwtClaimTypes.Name)?.Value ?? user.FindFirst(JwtClaimTypes.Subject)?.Value ?? "unknown";
-            var userToken = await _userTokenStore.GetTokenAsync(_httpContextAccessor.HttpContext.User);
+            var userToken = await _userTokenStore.GetTokenAsync(user);
 
             if (userToken == null)
             {
                 _logger.LogDebug("No token data found in user token store.");
                 return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(userToken.RefreshToken))
+            {
+                _logger.LogDebug("No refresh token found in user token store for user {user}. Returning current access token.", userName);
+                return userToken.AccessToken;
             }
 
             var dtRefresh = userToken.Expiration.Subtract(_options.User.RefreshBeforeExpiration);
@@ -132,7 +133,7 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
                     {
                         return new Lazy<Task<string>>(async () =>
                         {
-                            var refreshed = await RefreshUserAccessTokenAsync();
+                            var refreshed = await RefreshUserAccessTokenAsync(user);
                             return refreshed.AccessToken;
                         });
                     }).Value;
@@ -147,11 +148,11 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
         }
 
         /// <inheritdoc/>
-        public async Task RevokeRefreshTokenAsync()
+        public async Task RevokeRefreshTokenAsync(ClaimsPrincipal user)
         {
-            var userToken = await _userTokenStore.GetTokenAsync(_httpContextAccessor.HttpContext.User);
+            var userToken = await _userTokenStore.GetTokenAsync(user);
 
-            if (!string.IsNullOrEmpty(userToken.RefreshToken))
+            if (!string.IsNullOrEmpty(userToken?.RefreshToken))
             {
                 var response = await _tokenEndpointService.RevokeRefreshTokenAsync(userToken.RefreshToken);
 
@@ -162,14 +163,16 @@ namespace IdentityModel.AspNetCore.AccessTokenManagement
             }
         }
 
-        internal async Task<TokenResponse> RefreshUserAccessTokenAsync()
+        internal async Task<TokenResponse> RefreshUserAccessTokenAsync(ClaimsPrincipal user)
         {
-            var userToken = await _userTokenStore.GetTokenAsync(_httpContextAccessor.HttpContext.User);
+            var userToken = await _userTokenStore.GetTokenAsync(user);
             var response = await _tokenEndpointService.RefreshUserAccessTokenAsync(userToken.RefreshToken);
 
             if (!response.IsError)
             {
-                await _userTokenStore.StoreTokenAsync(_httpContextAccessor.HttpContext.User, response.AccessToken, response.ExpiresIn, response.RefreshToken);
+                var expiration = DateTime.UtcNow + TimeSpan.FromSeconds(response.ExpiresIn);
+
+                await _userTokenStore.StoreTokenAsync(user, response.AccessToken, expiration, response.RefreshToken);
             }
             else
             {

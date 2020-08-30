@@ -4,6 +4,7 @@
 using IdentityModel.AspNetCore.AccessTokenManagement;
 using System;
 using System.Net.Http;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Microsoft.Extensions.DependencyInjection
 {
@@ -28,20 +29,21 @@ namespace Microsoft.Extensions.DependencyInjection
             services.AddHttpContextAccessor();
             services.AddAuthentication();
 
-#if NETCOREAPP3_0
+#if NETCOREAPP3_1
             services.AddDistributedMemoryCache();
 #endif
 
-            services.AddTransient<IAccessTokenManagementService, AccessTokenManagementService>();
-            services.AddTransient<ITokenEndpointService, TokenEndpointService>();
+            services.TryAddTransient<IAccessTokenManagementService, AccessTokenManagementService>();
+            services.TryAddTransient<ITokenClientConfigurationService, DefaultTokenClientConfigurationService>();
+            services.TryAddTransient<ITokenEndpointService, TokenEndpointService>();
 
             services.AddHttpClient(AccessTokenManagementDefaults.BackChannelHttpClientName);
 
             services.AddTransient<UserAccessTokenHandler>();
             services.AddTransient<ClientAccessTokenHandler>();
 
-            services.AddTransient<IUserTokenStore, AuthenticationSessionUserTokenStore>();
-            services.AddTransient<IClientAccessTokenCache, ClientAccessTokenCache>();
+            services.TryAddTransient<IUserTokenStore, AuthenticationSessionUserTokenStore>();
+            services.TryAddTransient<IClientAccessTokenCache, ClientAccessTokenCache>();
 
             return new TokenManagementBuilder(services);
         }
